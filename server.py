@@ -32,7 +32,7 @@ BRIDGE_VERSION = 23
 
 HOST = os.getenv("STORYWORLD_HOST", "127.0.0.1")
 TOKEN = os.getenv("STORYWORLD_TOKEN", "").strip()
-PORT = int(os.getenv("STORYWORLD_PORT", "8765"))
+PORT = int(os.getenv("PORT", os.getenv("STORYWORLD_PORT", "8765")))
 LM_URL = os.getenv("STORYWORLD_LM_URL", "http://127.0.0.1:1234/v1").rstrip("/")
 MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "").strip()
 LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip()
@@ -1253,8 +1253,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if HOST != "127.0.0.1" and not TOKEN:
-        print("Refusing to listen on the network without STORYWORLD_TOKEN.", flush=True)
-        sys.exit(2)
-    print(f"Storyworld local bridge v{BRIDGE_VERSION} at http://{HOST}:{PORT}", flush=True)
+    print(f"Storyworld cloud bridge v{BRIDGE_VERSION} listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
