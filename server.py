@@ -44,8 +44,8 @@ _default_comfy_input = Path(os.getenv("LOCALAPPDATA", "")) / "Storyworld" / "ima
 COMFY_INPUT_DIR = os.getenv("STORYWORLD_COMFY_INPUT_DIR") or (str(_default_comfy_input) if _default_comfy_input.is_dir() else "")
 _default_voice_dir = Path(os.getenv("LOCALAPPDATA", "")) / "Storyworld" / "voice-ai" / "voices"
 _default_voice_python = Path(os.getenv("LOCALAPPDATA", "")) / "Storyworld" / "voice-ai" / "venv" / "Scripts" / "python.exe"
-VOICE_PYTHON = os.getenv("STORYWORLD_VOICE_PYTHON") or (str(_default_voice_python) if _default_voice_python.is_file() else "")
-VOICE_DIR = Path(os.getenv("STORYWORLD_VOICE_DIR")) if os.getenv("STORYWORLD_VOICE_DIR") else (_default_voice_dir if _default_voice_dir.is_dir() else None)
+VOICE_PYTHON = os.getenv("STORYWORLD_VOICE_PYTHON") or (str(_default_voice_python) if _default_voice_python.is_file() else sys.executable)
+VOICE_DIR = Path(os.getenv("STORYWORLD_VOICE_DIR")) if os.getenv("STORYWORLD_VOICE_DIR") else (_default_voice_dir if _default_voice_dir.is_dir() else Path("."))
 CLONE_PYTHON = os.getenv("STORYWORLD_CLONE_PYTHON", "")
 VOICE_NAMES = {"en-US": "en_US-amy-medium", "ru-RU": "ru_RU-irina-medium",
                "uk-UA": "uk_UA-ukrainian_tts-medium", "es-ES": "es_ES-sharvard-medium",
