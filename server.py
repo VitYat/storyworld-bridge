@@ -81,7 +81,10 @@ class ProviderTimeoutError(StoryError):
 
 def request_json(url: str, payload: dict | None = None, timeout: int = 120, extra_headers: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Storyworld/23",
+    }
     if LLM_API_KEY and any(domain in url for domain in ("api.groq.com", "openrouter.ai", "api.openai.com", "together.xyz")):
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     if extra_headers:
