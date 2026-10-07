@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: storyworld-bridge
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    region: frankfurt
+    envVars:
+      - key: STORYWORLD_HOST
+        value: 0.0.0.0
+      - key: STORYWORLD_PORT
+        value: 8765
+      - key: STORYWORLD_LM_URL
+        value: https://api.groq.com/openai/v1
+      - key: STORYWORLD_MODEL_ID
+        value: llama-3.3-70b-versatile
+      - key: STORYWORLD_LLM_API_KEY
+        sync: false
