@@ -302,10 +302,14 @@ def generate_compact_story(model: str, spec: dict, avoid: list[str], language: s
         except StoryError as exc:
             log_generation(f"page={page_number}/{page_total} outcome={type(exc).__name__} seconds={time.monotonic()-started:.1f}")
             raise StoryError(f"The local text model could not write page {page_number}: {exc}") from exc
-        if any(not isinstance(page.get(key), str) or not page[key].strip()
-               for key in ("heading", "body", "imagePrompt")):
-            raise StoryError(f"The local text model returned an incomplete page {page_number}.")
-        page = {"heading": page["heading"], "body": page["body"], "imagePrompt": page["imagePrompt"]}
+        heading = page.get("heading") or page.get("title") or page.get("name") or (f"Page {page_number}" if page_number > 1 else title)
+        body = page.get("body") or page.get("text") or page.get("content") or page.get("story") or ""
+        img_prompt = page.get("imagePrompt") or page.get("image_prompt") or page.get("prompt") or page.get("illustration") or ""
+        if not str(body).strip():
+            raise StoryError(f"The local text model returned an empty body for page {page_number}.")
+        if not str(img_prompt).strip():
+            img_prompt = f"Gentle story illustration: {spec['theme']}, {str(body)[:140]}"
+        page = {"heading": str(heading).strip(), "body": str(body).strip(), "imagePrompt": str(img_prompt).strip()}
         page["reflectionPrompt"] = REFLECTIONS.get(language, REFLECTIONS["English"])
         page["heroScene"] = hero_plan[page_number - 1]
         log_generation(f"page={page_number}/{page_total} outcome=complete seconds={time.monotonic()-started:.1f}")
