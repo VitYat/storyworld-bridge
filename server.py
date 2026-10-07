@@ -33,8 +33,8 @@ BRIDGE_VERSION = 23
 HOST = os.getenv("STORYWORLD_HOST", "127.0.0.1")
 TOKEN = os.getenv("STORYWORLD_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", os.getenv("STORYWORLD_PORT", "8765")))
-LM_URL = os.getenv("STORYWORLD_LM_URL", "http://127.0.0.1:1234/v1").rstrip("/")
-MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "").strip()
+LM_URL = os.getenv("STORYWORLD_LM_URL", "https://api.groq.com/openai/v1").rstrip("/")
+MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "llama-3.3-70b-versatile").strip()
 LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip()
 IMAGE_PROVIDER = os.getenv("STORYWORLD_IMAGE_PROVIDER", "auto").strip().lower()
 IMAGE_URL = os.getenv("STORYWORLD_IMAGE_URL", "http://127.0.0.1:7860").rstrip("/")
@@ -705,7 +705,7 @@ def generate_story(data: dict) -> dict:
     spec["learningObjective"] = (extra.get("objective") or explicit_objective or
                                  (str(goals[(continuity.get("episodeNumber", 1) - 1) % len(goals)])[:120]
                                   if goals else "")) if data.get("learningMode", True) else ""
-    if not LM_URL.endswith("/v1"):
+    if not is_cloud_llm() and not LM_URL.endswith("/v1"):
         raise StoryError("LM Studio API address must end in /v1.")
     story = generate_compact_story(model, spec, avoid, language)
     story["readingStage"] = stage
@@ -859,18 +859,28 @@ def episode_recap(model: str, story: dict, memory: dict, continuity: dict, avoid
               "summary": summary[:650], "bible": (str(memory.get("bible", ""))[:800] + " Latest: " + summary[:500]),
               "facts": [], "nextThread": "", "recapSource": "story-excerpts"}
     try:
-        response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
-            "model": model, "reasoning": "off", "max_output_tokens": 600, "store": False,
-            "system_prompt": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words",'
-                             '"bible":"updated world canon, at most 150 words", "facts":["3 lasting facts"],'
-                             '"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. '
-                             'Keep places, objects and relationships that may return later. '
-                             'Never invent an event, learning achievement, diagnosis or sacred quotation.',
-            "input": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400],
-                                 "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False),
-        }, timeout=60)
-        content = "\n".join(item.get("content", "") for item in response.get("output", [])
-                            if isinstance(item, dict) and item.get("type") == "message")
+        if is_cloud_llm():
+            response = request_json(f"{LM_URL}/chat/completions", {
+                "model": model, "max_tokens": 600,
+                "messages": [
+                    {"role": "system", "content": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words","bible":"updated world canon, at most 150 words","facts":["3 lasting facts"],"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. Keep places, objects and relationships that may return later. Never invent an event, learning achievement, diagnosis or sacred quotation.'},
+                    {"role": "user", "content": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400], "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False)},
+                ],
+            }, timeout=60)
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        else:
+            response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
+                "model": model, "reasoning": "off", "max_output_tokens": 600, "store": False,
+                "system_prompt": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words",'
+                                 '"bible":"updated world canon, at most 150 words", "facts":["3 lasting facts"],'
+                                 '"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. '
+                                 'Keep places, objects and relationships that may return later. '
+                                 'Never invent an event, learning achievement, diagnosis or sacred quotation.',
+                "input": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400],
+                                     "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False),
+            }, timeout=60)
+            content = "\n".join(item.get("content", "") for item in response.get("output", [])
+                                if isinstance(item, dict) and item.get("type") == "message")
         recap = parse_model_json(content)
         if any(not isinstance(recap.get(key), str) or not recap[key].strip() for key in ("summary", "bible")):
             return result
@@ -1225,9 +1235,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             model = selected_model()
-            text_status = {"ready": bool(model), "model": model}
+            text_status = {"ready": bool(model), "model": model, "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)}
         except StoryError:
-            text_status = {"ready": False, "model": None}
+            text_status = {"ready": False, "model": None, "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)}
         self.reply(200, {"text": text_status, "image": {"ready": image_status(), "referenceReady": reference_ready()},
                          "voice": {"locales": installed_voices(), "voices": installed_voice_catalog(),
                                    "familyVoices": len(family_voice_records()),
