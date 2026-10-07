@@ -178,7 +178,7 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
     if is_cloud_llm():
-        effective_tokens = max(max_tokens, 1400)
+        effective_tokens = min(max_tokens, 700)
         payload = {
             "model": model, "temperature": temperature, "max_tokens": effective_tokens,
             "messages": [
@@ -1337,7 +1337,7 @@ class Handler(BaseHTTPRequestHandler):
                 model = query_model or selected_model()
                 res = request_json(f"{LM_URL}/chat/completions", {
                     "model": model,
-                    "max_tokens": 1200,
+                    "max_tokens": 700,
                     "messages": [
                         {"role": "system", "content": "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"},
                         {"role": "user", "content": "Write page 1 about a brave kitten named Murzik finding a star."}
