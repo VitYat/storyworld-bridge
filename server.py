@@ -128,13 +128,13 @@ def models() -> list[str]:
 def selected_model() -> str | None:
     available = models()
     preferred = [
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
         "qwen/qwen3.8-27b",
-        "allam-2-7b",
         "llama-3.3-70b-versatile",
         "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "allam-2-7b",
     ]
     if MODEL_ID and MODEL_ID in available:
         return MODEL_ID
@@ -146,7 +146,7 @@ def selected_model() -> str | None:
             "whisper", "guard", "embed", "vision", "moderation", "orpheus", "canopylabs"
         ))]
         return general[0] if general else available[0]
-    return "openai/gpt-oss-120b" if is_cloud_llm() else None
+    return "qwen/qwen3.8-27b" if is_cloud_llm() else None
 
 
 def release_image_memory() -> None:
