@@ -35,7 +35,7 @@ TOKEN = os.getenv("STORYWORLD_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", os.getenv("STORYWORLD_PORT", "8765")))
 LM_URL = os.getenv("STORYWORLD_LM_URL", "https://api.groq.com/openai/v1").rstrip("/")
 MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "llama-3.3-70b-versatile").strip()
-LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip()
+LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip().strip('"').strip("'")
 IMAGE_PROVIDER = os.getenv("STORYWORLD_IMAGE_PROVIDER", "auto").strip().lower()
 IMAGE_URL = os.getenv("STORYWORLD_IMAGE_URL", "http://127.0.0.1:7860").rstrip("/")
 COMFY_URL = os.getenv("STORYWORLD_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -93,12 +93,6 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
     try:
         with urlopen(request, timeout=timeout) as response:
             return json.load(response)
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
-    except URLError as exc:
-        if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
-            raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
-        raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
     except HTTPError as exc:
         err_body = ""
         try:
@@ -106,6 +100,12 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
         except Exception:
             pass
         raise StoryError(f"HTTP {exc.code} on {url}: {err_body or exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
+            raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
+        raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
 
 
 def is_cloud_llm() -> bool:
