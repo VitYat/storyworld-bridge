@@ -128,13 +128,13 @@ def models() -> list[str]:
 def selected_model() -> str | None:
     available = models()
     preferred = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "allam-2-7b",
         "llama-3.3-70b-versatile",
         "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
-        "llama3-70b-8192",
-        "llama3-8b-8192",
-        "gemma2-9b-it",
-        "mixtral-8x7b-32768",
     ]
     if MODEL_ID and MODEL_ID in available:
         return MODEL_ID
@@ -142,9 +142,11 @@ def selected_model() -> str | None:
         if pref in available:
             return pref
     if available:
-        text_only = [m for m in available if not any(x in m.lower() for x in ("whisper", "guard", "embed", "vision", "moderation"))]
-        return text_only[0] if text_only else available[0]
-    return MODEL_ID or ("llama-3.1-8b-instant" if is_cloud_llm() else None)
+        general = [m for m in available if not any(x in m.lower() for x in (
+            "whisper", "guard", "embed", "vision", "moderation", "orpheus", "canopylabs"
+        ))]
+        return general[0] if general else available[0]
+    return "openai/gpt-oss-120b" if is_cloud_llm() else None
 
 
 def release_image_memory() -> None:
@@ -176,15 +178,24 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
     if is_cloud_llm():
-        response = request_json(f"{LM_URL}/chat/completions", {
-            "model": model, "temperature": temperature, "max_tokens": max_tokens,
+        effective_tokens = max(max_tokens, 1400)
+        payload = {
+            "model": model, "temperature": temperature, "max_tokens": effective_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-        }, timeout=timeout)
+        }
+        response = request_json(f"{LM_URL}/chat/completions", payload, timeout=timeout)
         try:
-            return response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
+            msg = choice.get("message", {})
+            content = msg.get("content") or ""
+            if not content.strip() and msg.get("reasoning"):
+                content = msg.get("reasoning", "")
+            if not content.strip():
+                raise StoryError("LLM returned empty text for this page.")
+            return content
         except (KeyError, IndexError, TypeError) as exc:
             raise StoryError("LLM provider returned no text for this page.") from exc
 
@@ -1317,17 +1328,26 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             self.reply(401, {"error": "Pairing token required"})
             return
-        if self.path == "/debug-llm":
+        if self.path.startswith("/debug-llm"):
+            query_model = None
+            if "?" in self.path:
+                from urllib.parse import parse_qs, urlparse
+                query_model = parse_qs(urlparse(self.path).query).get("model", [None])[0]
             try:
-                model = selected_model()
+                model = query_model or selected_model()
                 res = request_json(f"{LM_URL}/chat/completions", {
                     "model": model,
-                    "max_tokens": 30,
-                    "messages": [{"role": "user", "content": "Say 'Storyworld Cloud LLM is working!' in English"}]
-                }, timeout=15)
-                self.reply(200, {"success": True, "model": model, "lmUrl": LM_URL, "response": res})
+                    "max_tokens": 1200,
+                    "messages": [
+                        {"role": "system", "content": "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"},
+                        {"role": "user", "content": "Write page 1 about a brave kitten named Murzik finding a star."}
+                    ]
+                }, timeout=30)
+                msg = res.get("choices", [{}])[0].get("message", {})
+                content = msg.get("content") or msg.get("reasoning") or ""
+                self.reply(200, {"success": True, "model": model, "parsed": parse_model_json(content), "raw": content[:300]})
             except Exception as e:
-                self.reply(500, {"success": False, "error": str(e), "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY), "model": MODEL_ID})
+                self.reply(500, {"success": False, "model": query_model or selected_model(), "error": str(e), "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)})
             return
         if self.path == "/list-models":
             try:
