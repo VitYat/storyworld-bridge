@@ -113,22 +113,38 @@ def is_cloud_llm() -> bool:
 
 
 def models() -> list[str]:
-    if MODEL_ID and is_cloud_llm():
-        return [MODEL_ID]
     try:
-        result = request_json(f"{LM_URL}/models", timeout=5)
-        return [item["id"] for item in result.get("data", []) if isinstance(item, dict) and item.get("id")]
-    except Exception:
-        if MODEL_ID:
-            return [MODEL_ID]
-        return []
+        result = request_json(f"{LM_URL}/models", timeout=8)
+        model_list = [item["id"] for item in result.get("data", []) if isinstance(item, dict) and item.get("id")]
+        if model_list:
+            return model_list
+    except Exception as e:
+        print("Failed to fetch models:", e, flush=True)
+    if MODEL_ID:
+        return [MODEL_ID]
+    return []
 
 
 def selected_model() -> str | None:
-    if MODEL_ID:
-        return MODEL_ID
     available = models()
-    return available[0] if available else ("llama-3.3-70b-versatile" if is_cloud_llm() else None)
+    preferred = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+    ]
+    if MODEL_ID and MODEL_ID in available:
+        return MODEL_ID
+    for pref in preferred:
+        if pref in available:
+            return pref
+    if available:
+        text_only = [m for m in available if not any(x in m.lower() for x in ("whisper", "guard", "embed", "vision", "moderation"))]
+        return text_only[0] if text_only else available[0]
+    return MODEL_ID or ("llama-3.1-8b-instant" if is_cloud_llm() else None)
 
 
 def release_image_memory() -> None:
@@ -503,21 +519,41 @@ def synthesize_book(data: dict) -> dict:
 
 def parse_model_json(content: str) -> dict:
     if not isinstance(content, str) or not content.strip():
-        raise StoryError("The model returned no story text. Increase its context or output token limit in LM Studio.")
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I)
+        raise StoryError("The model returned no story text.")
+    # Remove thinking tags from reasoning models
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.I).strip()
+    # If code fence is present, extract it
+    code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.I)
+    target = code_block.group(1).strip() if code_block else cleaned
+
     try:
-        result = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
+        result = json.loads(target, strict=False)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+
+    start, end = target.find("{"), target.rfind("}")
+    if start >= 0 and end > start:
         try:
-            result = json.loads(cleaned[start:end + 1]) if start >= 0 and end > start else None
-        except json.JSONDecodeError:
-            result = None
-        if result is None:
-            raise StoryError("The model did not return complete story JSON. Retry or increase its context in LM Studio.") from exc
-    if not isinstance(result, dict):
-        raise StoryError("The model returned an invalid story structure.")
-    return result
+            result = json.loads(target[start:end + 1], strict=False)
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+
+    # Regex extraction fallback for resilient parsing
+    heading_m = re.search(r'"heading"\s*:\s*"([^"]+)"', target)
+    body_m = re.search(r'"body"\s*:\s*"((?:\\.|[^"\\])+)"', target)
+    img_m = re.search(r'"imagePrompt"\s*:\s*"((?:\\.|[^"\\])+)"', target)
+    if heading_m and body_m and img_m:
+        return {
+            "heading": heading_m.group(1),
+            "body": body_m.group(1).replace(r"\"", '"').replace(r"\n", " ").replace("\\\\", "\\"),
+            "imagePrompt": img_m.group(1).replace(r"\"", '"'),
+        }
+
+    raise StoryError(f"The model did not return complete story JSON. Response preview: {content[:150]}")
 
 
 def validate_story(story: dict, avoid: list[str], language: str, expected_pages: int | None = None) -> dict:
@@ -1292,6 +1328,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {"success": True, "model": model, "lmUrl": LM_URL, "response": res})
             except Exception as e:
                 self.reply(500, {"success": False, "error": str(e), "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY), "model": MODEL_ID})
+            return
+        if self.path == "/list-models":
+            try:
+                avail = models()
+                chosen = selected_model()
+                self.reply(200, {"success": True, "available": avail, "selected": chosen, "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)})
+            except Exception as e:
+                self.reply(500, {"success": False, "error": str(e)})
             return
         if self.path == "/voices":
             self.reply(200, {"voices": installed_voice_catalog()})
