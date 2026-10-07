@@ -94,13 +94,18 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
         with urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except TimeoutError as exc:
-        raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds") from exc
+        raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
     except URLError as exc:
         if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
-            raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds") from exc
-        raise StoryError(f"Provider unavailable: {exc}") from exc
+            raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
+        raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
     except HTTPError as exc:
-        raise StoryError(f"Provider unavailable: {exc}") from exc
+        err_body = ""
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            pass
+        raise StoryError(f"HTTP {exc.code} on {url}: {err_body or exc.reason}") from exc
 
 
 def is_cloud_llm() -> bool:
@@ -154,23 +159,36 @@ ORIGINAL_COMPANIONS = [companion["role"] for companion in COMPANIONS]
 def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int = 120,
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
-    if not is_cloud_llm():
+    if is_cloud_llm():
+        response = request_json(f"{LM_URL}/chat/completions", {
+            "model": model, "temperature": temperature, "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }, timeout=timeout)
         try:
-            response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
-                "model": model, "input": user,
-                "system_prompt": system, "reasoning": "off", "max_output_tokens": max_tokens,
-                "temperature": temperature, "store": False,
-            }, timeout=timeout)
-            return "\n".join(item.get("content", "") for item in response.get("output", [])
-                             if isinstance(item, dict) and item.get("type") == "message"
-                             and isinstance(item.get("content"), str))
-        except ProviderTimeoutError:
-            raise
-        except StoryError as native_error:
-            if not any(code in str(native_error) for code in ("HTTP Error 400", "HTTP Error 404")):
-                raise
+            return response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise StoryError("LLM provider returned no text for this page.") from exc
 
-    # Cloud / OpenAI-compatible endpoint
+    # Native LM Studio endpoint for local inference
+    try:
+        response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
+            "model": model, "input": user,
+            "system_prompt": system, "reasoning": "off", "max_output_tokens": max_tokens,
+            "temperature": temperature, "store": False,
+        }, timeout=timeout)
+        return "\n".join(item.get("content", "") for item in response.get("output", [])
+                         if isinstance(item, dict) and item.get("type") == "message"
+                         and isinstance(item.get("content"), str))
+    except ProviderTimeoutError:
+        raise
+    except StoryError as native_error:
+        if not any(code in str(native_error) for code in ("HTTP 400", "HTTP 404", "HTTP Error 400", "HTTP Error 404")):
+            raise
+
+    # Fallback to OpenAI-compatible endpoint
     response = request_json(f"{LM_URL}/chat/completions", {
         "model": model, "temperature": temperature, "max_tokens": max_tokens,
         "messages": [
@@ -1218,8 +1236,62 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        if self.path in ("/", "/index.html"):
+            html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Storyworld Cloud Bridge</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .card { background: #1e293b; padding: 40px; border-radius: 24px; max-width: 520px; width: 100%; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid #334155; }
+        h1 { margin: 12px 0 8px; font-size: 26px; color: #38bdf8; font-weight: 700; }
+        p { color: #94a3b8; line-height: 1.6; font-size: 15px; margin: 12px 0; }
+        .status { display: inline-flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.15); color: #4ade80; padding: 6px 16px; border-radius: 999px; font-weight: 600; font-size: 13px; }
+        .dot { width: 9px; height: 9px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 10px #22c55e; }
+        .btn { display: inline-block; background: linear-gradient(135deg, #38bdf8, #818cf8); color: #0f172a; font-weight: 700; padding: 14px 28px; border-radius: 14px; text-decoration: none; font-size: 16px; margin-top: 18px; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(56, 189, 248, 0.35); }
+        .links { margin-top: 24px; font-size: 13px; color: #64748b; }
+        .links a { color: #38bdf8; text-decoration: none; }
+        .links a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="status"><span class="dot"></span> Storyworld Cloud Engine Online</div>
+        <h1>Storyworld AI Bridge</h1>
+        <p>This server is the active cloud AI bridge powering instant story writing (Groq LLaMA 3.3 70B), high-resolution illustrations (Flux), and realistic narration voices (EdgeTTS).</p>
+        <p>To read or create children's stories, open the Storyworld Web Application:</p>
+        <a class="btn" href="https://broken-truth-45ff.yatsuravitalii.workers.dev">Launch Storyworld Web App &rarr;</a>
+        <div class="links">
+            <a href="/health">Engine Health</a> &bull; <a href="/voices">Voice Catalog</a> &bull; <a href="/catalog">Theme Catalog</a>
+        </div>
+    </div>
+</body>
+</html>"""
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if not self.authorized():
             self.reply(401, {"error": "Pairing token required"})
+            return
+        if self.path == "/debug-llm":
+            try:
+                model = selected_model()
+                res = request_json(f"{LM_URL}/chat/completions", {
+                    "model": model,
+                    "max_tokens": 30,
+                    "messages": [{"role": "user", "content": "Say 'Storyworld Cloud LLM is working!' in English"}]
+                }, timeout=15)
+                self.reply(200, {"success": True, "model": model, "lmUrl": LM_URL, "response": res})
+            except Exception as e:
+                self.reply(500, {"success": False, "error": str(e), "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY), "model": MODEL_ID})
             return
         if self.path == "/voices":
             self.reply(200, {"voices": installed_voice_catalog()})
