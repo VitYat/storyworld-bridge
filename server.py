@@ -797,7 +797,7 @@ def pack_rules(content_pack: str, theme: str, tradition: str, data: dict, age: i
 def generate_story(data: dict) -> dict:
     model = selected_model()
     if not model:
-        raise StoryError("LM Studio has no loaded model. Load an instruct model and start Local Server.")
+        raise StoryError("The story generation model is temporarily unavailable. Please retry.")
     profile = data.get("profile", {})
     if not isinstance(profile, dict):
         raise StoryError("Invalid profile")
@@ -893,8 +893,6 @@ def generate_story(data: dict) -> dict:
     spec["learningObjective"] = (extra.get("objective") or explicit_objective or
                                  (str(goals[(continuity.get("episodeNumber", 1) - 1) % len(goals)])[:120]
                                   if goals else "")) if data.get("learningMode", True) else ""
-    if not is_cloud_llm() and not LM_URL.endswith("/v1"):
-        raise StoryError("LM Studio API address must end in /v1.")
     story = generate_compact_story(model, spec, avoid, language)
     story["readingStage"] = stage
     story["contentPack"] = content_pack
@@ -1047,28 +1045,14 @@ def episode_recap(model: str, story: dict, memory: dict, continuity: dict, avoid
               "summary": summary[:650], "bible": (str(memory.get("bible", ""))[:800] + " Latest: " + summary[:500]),
               "facts": [], "nextThread": "", "recapSource": "story-excerpts"}
     try:
-        if is_cloud_llm():
-            response = request_json(f"{LM_URL}/chat/completions", {
-                "model": model, "max_tokens": 350,
-                "messages": [
-                    {"role": "system", "content": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words","bible":"updated world canon, at most 150 words","facts":["3 lasting facts"],"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. Keep places, objects and relationships that may return later. Never invent an event, learning achievement, diagnosis or sacred quotation.'},
-                    {"role": "user", "content": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400], "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False)},
-                ],
-            }, timeout=60)
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-        else:
-            response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
-                "model": model, "reasoning": "off", "max_output_tokens": 600, "store": False,
-                "system_prompt": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words",'
-                                 '"bible":"updated world canon, at most 150 words", "facts":["3 lasting facts"],'
-                                 '"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. '
-                                 'Keep places, objects and relationships that may return later. '
-                                 'Never invent an event, learning achievement, diagnosis or sacred quotation.',
-                "input": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400],
-                                     "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False),
-            }, timeout=60)
-            content = "\n".join(item.get("content", "") for item in response.get("output", [])
-                                if isinstance(item, dict) and item.get("type") == "message")
+        sys_prompt = ('Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words",'
+                      '"bible":"updated world canon, at most 150 words","facts":["3 lasting facts"],'
+                      '"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. '
+                      'Keep places, objects and relationships that may return later. '
+                      'Never invent an event, learning achievement, diagnosis or sacred quotation.')
+        user_prompt = json.dumps({"previousBible": str(memory.get("bible", ""))[:1400],
+                                 "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False)
+        content = chat_text(model, sys_prompt, user_prompt, 450)
         recap = parse_model_json(content)
         if any(not isinstance(recap.get(key), str) or not recap[key].strip() for key in ("summary", "bible")):
             return result
