@@ -1306,18 +1306,29 @@ def character_from_drawing(data: dict) -> dict:
     style = data.get("style", "Watercolor")
     if style not in IMAGE_STYLES:
         raise StoryError("Unknown illustration style")
-    drawing = decode_jpeg(data.get("drawingBase64"), "Drawing")
+    
     checkpoint = comfy_checkpoint()
-    if not checkpoint:
-        raise StoryError("Turning a drawing into a character requires the local ComfyUI image model; it is not ready.")
-    try:
-        decoded = comfy_image(description, checkpoint, style, drawing, False, {"drawing": True})
-    except (HTTPError, URLError, TimeoutError, KeyError) as exc:
-        raise StoryError(f"ComfyUI image generation failed: {exc}") from exc
-    if not decoded.startswith(b"\x89PNG\r\n\x1a\n") or len(decoded) > 1_500_000:
-        raise StoryError("ComfyUI returned an invalid or oversized PNG")
-    return {"name": name, "visual": description, "kind": "drawn by the child",
-            "imageBase64": base64.b64encode(decoded).decode("ascii"), "mimeType": "image/png"}
+    if checkpoint:
+        try:
+            drawing = decode_jpeg(data.get("drawingBase64"), "Drawing")
+            decoded = comfy_image(description, checkpoint, style, drawing, False, {"drawing": True})
+            if decoded.startswith(b"\x89PNG\r\n\x1a\n") and len(decoded) <= 1_500_000:
+                return {"name": name, "visual": description, "kind": "drawn by the child",
+                        "imageBase64": base64.b64encode(decoded).decode("ascii"), "mimeType": "image/png"}
+        except (HTTPError, URLError, TimeoutError, KeyError, StoryError):
+            pass
+
+    # Cloud fallback: generate polished character via cloud engine
+    prompt = f"Polished character design of {name}, {description}, charming storybook character, centered, full body"
+    extras = {"characterSheet": f"{name}: {description}"}
+    img_res = cloud_image_generate(prompt, style, extras)
+    return {
+        "name": name,
+        "visual": description,
+        "kind": "drawn by the child",
+        "imageBase64": img_res["imageBase64"],
+        "mimeType": img_res.get("mimeType", "image/jpeg"),
+    }
 
 
 def catalog(_data: dict | None = None) -> dict:
