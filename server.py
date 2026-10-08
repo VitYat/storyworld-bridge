@@ -1228,7 +1228,7 @@ def cloud_image_generate(prompt: str, style: str, extras: dict | None = None) ->
             char_desc += f"{extras['characterSheet']}. "
         if extras.get("castVisuals"):
             char_desc += f"{extras['castVisuals']}. "
-    full_prompt = f"Gentle children's picture-book illustration, {style_desc}, {char_desc}consistent characters, no text, no lettering, {prompt}"
+    full_prompt = f"In enchanting {style_desc}, joyful whimsical fairytale children's picture-book illustration, {char_desc}radiant happy characters, vibrant, no text, no lettering, {prompt}"
     encoded = urllib.parse.quote(full_prompt[:500])
     seed = random.randint(1000, 999999)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=turbo&nologo=true&seed={seed}"
