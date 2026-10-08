@@ -6,6 +6,8 @@ STYLES = {
     "Colored pencil": "hand-drawn children's picture book, coloured pencil strokes on cream paper, cross-hatched shading, warm subtle colours, carefully drawn natural face proportions",
     "Storybook 3D": "stylized three-dimensional storybook diorama, handcrafted clay and felt materials, rounded forms, miniature set, soft global illumination, natural child face proportions",
     "Classic ink": "classic illustrated children's book, fine pen-and-ink contours, delicate cross-hatching, translucent wash colours, warm ivory paper, expressive natural faces",
+    "Classic Animation": "traditional hand-drawn two-dimensional fairytale animation, graceful curved silhouettes, expressive hand-drawn face, clean ink contours, painted storybook scenery, luminous jewel colours, warm theatrical lighting, original child hero",
+    "3D Animation": "cinematic three-dimensional family animation, appealing rounded original child character, expressive facial acting, sculpted hair, tactile clothing, soft subsurface lighting, richly rendered environment, warm depth of field",
     "Disney": "traditional hand-drawn two-dimensional fairytale animation, graceful curved silhouettes, expressive hand-drawn face, clean ink contours, painted storybook scenery, luminous jewel colours, warm theatrical lighting, original child hero",
     "Pixar": "cinematic three-dimensional family animation, appealing rounded original child character, expressive facial acting, sculpted hair, tactile clothing, soft subsurface lighting, richly rendered environment, warm depth of field",
     "Anime": "gentle Japanese anime storybook, clean two-dimensional line art, soft cel shading, hand-painted nature backgrounds, warm slice-of-life atmosphere, preserve the reference child's actual face proportions",
@@ -14,6 +16,8 @@ STYLES = {
 }
 
 NEGATIVES = {
+    "Classic Animation": "3d render, clay, plastic, photorealism, anime, manga",
+    "3D Animation": "flat cel shading, manga, anime, pencil sketch, watercolour wash",
     "Disney": "3d render, clay, plastic, photorealism, anime, manga",
     "Pixar": "flat cel shading, manga, anime, pencil sketch, watercolour wash",
     "Storybook 3D": "flat cel shading, photorealistic portrait, anime, glossy plastic",
