@@ -197,7 +197,7 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
     if is_cloud_llm():
-        effective_tokens = min(max_tokens, 240)
+        effective_tokens = min(max_tokens, 500)
         candidates = [model]
         for m in ("qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"):
             if m not in candidates:
@@ -589,15 +589,35 @@ def parse_model_json(content: str) -> dict:
             pass
 
     # Regex extraction fallback for resilient parsing
-    heading_m = re.search(r'"heading"\s*:\s*"([^"]+)"', target)
-    body_m = re.search(r'"body"\s*:\s*"((?:\\.|[^"\\])+)"', target)
-    img_m = re.search(r'"imagePrompt"\s*:\s*"((?:\\.|[^"\\])+)"', target)
-    if heading_m and body_m and img_m:
-        return {
-            "heading": heading_m.group(1),
-            "body": body_m.group(1).replace(r"\"", '"').replace(r"\n", " ").replace("\\\\", "\\"),
-            "imagePrompt": img_m.group(1).replace(r"\"", '"'),
-        }
+    heading_m = re.search(r'"(?:heading|title|name)"\s*:\s*"([^"]+)"', target, re.I)
+    body_m = re.search(r'"(?:body|text|content|story)"\s*:\s*"((?:\\.|[^"\\])+)"', target, re.I)
+    img_m = re.search(r'"(?:imagePrompt|prompt|image_prompt|illustration)"\s*:\s*"((?:\\.|[^"\\])+)"', target, re.I)
+
+    # 1. Normal match with heading and body
+    if heading_m and body_m:
+        h = heading_m.group(1).strip()
+        b = body_m.group(1).replace(r"\"", '"').replace(r"\n", " ").replace("\\\\", "\\").strip()
+        img = img_m.group(1).replace(r"\"", '"').strip() if img_m else f"Gentle story illustration: {h}"
+        return {"heading": h, "body": b, "imagePrompt": img}
+
+    # 2. Body cut off mid-sentence without closing quote
+    body_trunc = re.search(r'"(?:body|text|content|story)"\s*:\s*"([^"]+)$', target, re.I)
+    if body_trunc:
+        raw_body = body_trunc.group(1).rstrip(", \r\n}").strip()
+        if len(raw_body) > 15:
+            h = heading_m.group(1).strip() if heading_m else "Story"
+            img = img_m.group(1).replace(r"\"", '"').strip() if img_m else f"Gentle story illustration: {h}"
+            return {
+                "heading": h,
+                "body": raw_body.replace(r"\"", '"').replace(r"\n", " ").replace("\\\\", "\\"),
+                "imagePrompt": img,
+            }
+
+    # 3. Only body present
+    if body_m:
+        b = body_m.group(1).replace(r"\"", '"').replace(r"\n", " ").replace("\\\\", "\\").strip()
+        img = img_m.group(1).replace(r"\"", '"').strip() if img_m else "Gentle storybook scene"
+        return {"heading": "Story", "body": b, "imagePrompt": img}
 
     raise StoryError(f"The model did not return complete story JSON. Response preview: {content[:150]}")
 
@@ -961,7 +981,7 @@ def episode_recap(model: str, story: dict, memory: dict, continuity: dict, avoid
     try:
         if is_cloud_llm():
             response = request_json(f"{LM_URL}/chat/completions", {
-                "model": model, "max_tokens": 240,
+                "model": model, "max_tokens": 350,
                 "messages": [
                     {"role": "system", "content": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words","bible":"updated world canon, at most 150 words","facts":["3 lasting facts"],"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. Keep places, objects and relationships that may return later. Never invent an event, learning achievement, diagnosis or sacred quotation.'},
                     {"role": "user", "content": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400], "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False)},
@@ -1369,7 +1389,7 @@ class Handler(BaseHTTPRequestHandler):
                 model = query_model or selected_model()
                 res = request_json(f"{LM_URL}/chat/completions", {
                     "model": model,
-                    "max_tokens": 240,
+                    "max_tokens": 480,
                     "messages": [
                         {"role": "system", "content": "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"},
                         {"role": "user", "content": "Write page 1 about a brave kitten named Murzik finding a star."}
