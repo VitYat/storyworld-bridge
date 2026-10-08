@@ -1504,19 +1504,12 @@ class Handler(BaseHTTPRequestHandler):
                 query_model = parse_qs(urlparse(self.path).query).get("model", [None])[0]
             try:
                 model = query_model or selected_model()
-                res = request_json(f"{LM_URL}/chat/completions", {
-                    "model": model,
-                    "max_tokens": 480,
-                    "messages": [
-                        {"role": "system", "content": "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"},
-                        {"role": "user", "content": "Write page 1 about a brave kitten named Murzik finding a star."}
-                    ]
-                }, timeout=30)
-                msg = res.get("choices", [{}])[0].get("message", {})
-                content = msg.get("content") or msg.get("reasoning") or ""
-                self.reply(200, {"success": True, "model": model, "parsed": parse_model_json(content), "raw": content[:300]})
+                sys_prompt = "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"
+                user_prompt = "Write page 1 about a brave kitten named Murzik finding a star."
+                content = chat_text(model, sys_prompt, user_prompt, 480)
+                self.reply(200, {"success": True, "parsed": parse_model_json(content), "raw": content[:300]})
             except Exception as e:
-                self.reply(500, {"success": False, "model": query_model or selected_model(), "error": str(e), "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)})
+                self.reply(500, {"success": False, "error": str(e)})
             return
         if self.path == "/list-models":
             try:
