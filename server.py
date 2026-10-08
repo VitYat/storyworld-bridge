@@ -36,6 +36,7 @@ PORT = int(os.getenv("PORT", os.getenv("STORYWORLD_PORT", "8765")))
 LM_URL = os.getenv("STORYWORLD_LM_URL", "https://api.groq.com/openai/v1").rstrip("/")
 MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "llama-3.3-70b-versatile").strip()
 LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip().strip('"').strip("'")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip().strip('"').strip("'")
 IMAGE_PROVIDER = os.getenv("STORYWORLD_IMAGE_PROVIDER", "auto").strip().lower()
 IMAGE_URL = os.getenv("STORYWORLD_IMAGE_URL", "http://127.0.0.1:7860").rstrip("/")
 COMFY_URL = os.getenv("STORYWORLD_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -87,6 +88,8 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
     }
     if LLM_API_KEY and any(domain in url for domain in ("api.groq.com", "openrouter.ai", "api.openai.com", "together.xyz")):
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    if GEMINI_API_KEY and "generativelanguage.googleapis.com" in url:
+        headers["Authorization"] = f"Bearer {GEMINI_API_KEY}"
     if extra_headers:
         headers.update(extra_headers)
     for attempt in range(retries):
@@ -128,7 +131,7 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
 
 
 def is_cloud_llm() -> bool:
-    return any(domain in LM_URL for domain in ("api.groq.com", "openrouter.ai", "api.openai.com", "together.xyz")) or bool(LLM_API_KEY)
+    return any(domain in LM_URL for domain in ("api.groq.com", "openrouter.ai", "api.openai.com", "together.xyz", "generativelanguage.googleapis.com")) or bool(LLM_API_KEY) or bool(GEMINI_API_KEY)
 
 
 def models() -> list[str]:
@@ -145,12 +148,14 @@ def models() -> list[str]:
 
 
 def selected_model() -> str | None:
+    if GEMINI_API_KEY:
+        return "gemini-2.0-flash"
     available = models()
     preferred = [
+        "llama-3.1-8b-instant",
         "qwen/qwen3.8-27b",
         "llama-3.3-70b-versatile",
         "llama-3.1-70b-versatile",
-        "llama-3.1-8b-instant",
         "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
         "allam-2-7b",
@@ -165,7 +170,7 @@ def selected_model() -> str | None:
             "whisper", "guard", "embed", "vision", "moderation", "orpheus", "canopylabs"
         ))]
         return general[0] if general else available[0]
-    return "qwen/qwen3.8-27b" if is_cloud_llm() else None
+    return "gemini-2.0-flash" if GEMINI_API_KEY else ("qwen/qwen3.8-27b" if is_cloud_llm() else None)
 
 
 def release_image_memory() -> None:
@@ -197,7 +202,25 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
     if is_cloud_llm():
-        effective_tokens = min(max_tokens, 500)
+        effective_tokens = min(max_tokens, 600)
+        # If Gemini API key is configured, use Gemini 2.0 Flash first
+        if GEMINI_API_KEY:
+            try:
+                gemini_payload = {
+                    "model": "gemini-2.0-flash", "temperature": temperature, "max_tokens": effective_tokens,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                }
+                res = request_json("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                                   gemini_payload, timeout=timeout, retries=2)
+                content = res["choices"][0].get("message", {}).get("content", "")
+                if content.strip():
+                    return content
+            except Exception as exc:
+                print(f"Gemini call failed: {exc}. Trying Groq fallback...", flush=True)
+
         candidates = [model]
         for m in ("qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"):
             if m not in candidates:
@@ -1171,16 +1194,28 @@ def cloud_image_generate(prompt: str, style: str, extras: dict | None = None) ->
     import random
     import urllib.parse
     style_desc = IMAGE_STYLES.get(style, "warm gentle watercolor storybook illustration")
-    full_prompt = f"Gentle children's picture-book illustration, {style_desc}, consistent characters, no text, no lettering, {prompt}"
+    char_desc = ""
+    if extras:
+        if extras.get("characterSheet"):
+            char_desc += f"{extras['characterSheet']}. "
+        if extras.get("castVisuals"):
+            char_desc += f"{extras['castVisuals']}. "
+    full_prompt = f"Gentle children's picture-book illustration, {style_desc}, {char_desc}consistent characters, no text, no lettering, {prompt}"
     encoded = urllib.parse.quote(full_prompt[:500])
     seed = random.randint(1000, 999999)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=flux&nologo=true&seed={seed}"
+    # Fast SDXL Turbo model generates in 1.5-2.5 seconds
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=turbo&nologo=true&seed={seed}"
     req = Request(url, headers={"User-Agent": "Storyworld/23"})
     try:
-        with urlopen(req, timeout=45) as resp:
+        with urlopen(req, timeout=25) as resp:
             content = resp.read()
     except Exception as exc:
-        raise StoryError(f"Cloud image generation failed: {exc}") from exc
+        try:
+            url_flux = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=flux&nologo=true&seed={seed}"
+            with urlopen(Request(url_flux, headers={"User-Agent": "Storyworld/23"}), timeout=40) as resp:
+                content = resp.read()
+        except Exception:
+            raise StoryError(f"Cloud image generation failed: {exc}") from exc
     if not content or len(content) < 1000:
         raise StoryError("Cloud image generation returned empty data")
     mime = "image/png" if content.startswith(b"\x89PNG") else "image/jpeg"
@@ -1217,8 +1252,7 @@ def generate_image(data: dict) -> dict:
                 return {"imageBase64": base64.b64encode(decoded).decode("ascii"), "mimeType": "image/png"}
         except (HTTPError, URLError, TimeoutError, KeyError):
             pass
-    if photo:
-        raise StoryError("Photo references require the local ComfyUI image model; it is not ready.")
+
     try:
         response = request_json(f"{IMAGE_URL}/sdapi/v1/txt2img", {
             "prompt": "Gentle children's picture-book illustration, " + IMAGE_STYLES[style] + ", consistent characters, no lettering. "
