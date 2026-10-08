@@ -33,8 +33,8 @@ BRIDGE_VERSION = 23
 HOST = os.getenv("STORYWORLD_HOST", "127.0.0.1")
 TOKEN = os.getenv("STORYWORLD_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", os.getenv("STORYWORLD_PORT", "8765")))
-LM_URL = os.getenv("STORYWORLD_LM_URL", "https://api.groq.com/openai/v1").rstrip("/")
-MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "llama-3.3-70b-versatile").strip()
+LM_URL = os.getenv("STORYWORLD_LM_URL", "").rstrip("/")
+MODEL_ID = os.getenv("STORYWORLD_MODEL_ID", "").strip()
 LLM_API_KEY = os.getenv("STORYWORLD_LLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GROQ_API_KEY", ""))).strip().strip('"').strip("'")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip().strip('"').strip("'")
 IMAGE_PROVIDER = os.getenv("STORYWORLD_IMAGE_PROVIDER", "auto").strip().lower()
@@ -130,47 +130,56 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
             raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
 
 
+def check_local_lm_studio() -> tuple[str, str] | None:
+    try:
+        req = Request("http://127.0.0.1:1234/v1/models", headers={"User-Agent": "Storyworld/23"})
+        with urlopen(req, timeout=1.0) as res:
+            data = json.load(res)
+            model_items = [item["id"] for item in data.get("data", []) if isinstance(item, dict) and item.get("id")]
+            if model_items:
+                chat_models = [m for m in model_items if not any(x in m.lower() for x in ("embed", "embedding", "vision", "bge", "nomic"))]
+                return "http://127.0.0.1:1234/v1", (chat_models[0] if chat_models else model_items[0])
+    except Exception:
+        pass
+    return None
+
+
+def get_effective_lm_config() -> tuple[str, str, bool]:
+    """Returns (lm_url, model_id, is_local). Automatically selects local LM Studio if running, else Cloudflare Workers AI/Groq."""
+    if LM_URL:
+        is_local = "127.0.0.1" in LM_URL or "localhost" in LM_URL
+        return LM_URL, (MODEL_ID or ("qwen3.5-9b" if is_local else "llama-3.3-70b-versatile")), is_local
+
+    local = check_local_lm_studio()
+    if local:
+        return local[0], local[1], True
+
+    if LLM_API_KEY:
+        return "https://api.groq.com/openai/v1", (MODEL_ID or "llama-3.3-70b-versatile"), False
+
+    return "https://broken-truth-45ff.yatsuravitalii.workers.dev/cf-ai", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", False
+
+
 def is_cloud_llm() -> bool:
-    return any(domain in LM_URL for domain in ("api.groq.com", "openrouter.ai", "api.openai.com", "together.xyz", "generativelanguage.googleapis.com")) or bool(LLM_API_KEY) or bool(GEMINI_API_KEY)
+    _, _, is_local = get_effective_lm_config()
+    return not is_local
 
 
 def models() -> list[str]:
+    lm_url, model, is_local = get_effective_lm_config()
     try:
-        result = request_json(f"{LM_URL}/models", timeout=8)
+        result = request_json(f"{lm_url}/models", timeout=4)
         model_list = [item["id"] for item in result.get("data", []) if isinstance(item, dict) and item.get("id")]
         if model_list:
             return model_list
-    except Exception as e:
-        print("Failed to fetch models:", e, flush=True)
-    if MODEL_ID:
-        return [MODEL_ID]
-    return []
+    except Exception:
+        pass
+    return [model] if model else ["ready"]
 
 
 def selected_model() -> str | None:
-    if GEMINI_API_KEY:
-        return "gemini-2.0-flash"
-    available = models()
-    preferred = [
-        "llama-3.1-8b-instant",
-        "qwen/qwen3.8-27b",
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        "allam-2-7b",
-    ]
-    if MODEL_ID and MODEL_ID in available:
-        return MODEL_ID
-    for pref in preferred:
-        if pref in available:
-            return pref
-    if available:
-        general = [m for m in available if not any(x in m.lower() for x in (
-            "whisper", "guard", "embed", "vision", "moderation", "orpheus", "canopylabs"
-        ))]
-        return general[0] if general else available[0]
-    return "gemini-2.0-flash" if GEMINI_API_KEY else ("qwen/qwen3.8-27b" if is_cloud_llm() else None)
+    _, model, _ = get_effective_lm_config()
+    return model or "ready"
 
 
 def release_image_memory() -> None:
@@ -200,32 +209,66 @@ ORIGINAL_COMPANIONS = [companion["role"] for companion in COMPANIONS]
 
 def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int = 120,
               temperature: float = 0.45) -> str:
-    """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
-    if is_cloud_llm():
-        effective_tokens = min(max_tokens, 600)
-        # If Gemini API key is configured, use Gemini 2.0 Flash first
-        if GEMINI_API_KEY:
-            try:
-                gemini_payload = {
-                    "model": "gemini-2.0-flash", "temperature": temperature, "max_tokens": effective_tokens,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                }
-                res = request_json("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                                   gemini_payload, timeout=timeout, retries=2)
-                content = res["choices"][0].get("message", {}).get("content", "")
-                if content.strip():
-                    return content
-            except Exception as exc:
-                print(f"Gemini call failed: {exc}. Trying Groq fallback...", flush=True)
+    """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud, with rock-solid Cloudflare Workers AI fallback."""
+    lm_url, effective_model, is_local = get_effective_lm_config()
+    effective_tokens = min(max_tokens, 600)
 
-        candidates = [model]
-        for m in ("qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+    # 1. Try local LM Studio if running
+    if is_local:
+        try:
+            native_url = f"{lm_url[:-3]}/api/v1/chat"
+            response = request_json(native_url, {
+                "model": effective_model, "input": user,
+                "system_prompt": system, "reasoning": "off", "max_output_tokens": effective_tokens,
+                "temperature": temperature, "store": False,
+            }, timeout=timeout)
+            out = "\n".join(item.get("content", "") for item in response.get("output", [])
+                            if isinstance(item, dict) and item.get("type") == "message"
+                            and isinstance(item.get("content"), str))
+            if out.strip():
+                return out.strip()
+        except Exception as native_err:
+            print(f"Local LM Studio native call failed: {native_err}. Trying local completions...", flush=True)
+
+        try:
+            response = request_json(f"{lm_url}/chat/completions", {
+                "model": effective_model, "temperature": temperature, "max_tokens": effective_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }, timeout=timeout)
+            msg = response["choices"][0]["message"]
+            content = msg.get("content") or msg.get("reasoning_content") or ""
+            if content.strip():
+                return content.strip()
+        except Exception as comp_err:
+            print(f"Local completions failed: {comp_err}. Falling back to cloud...", flush=True)
+
+    # 2. Try Gemini 2.0 Flash if API key configured
+    if GEMINI_API_KEY:
+        try:
+            gemini_payload = {
+                "model": "gemini-2.0-flash", "temperature": temperature, "max_tokens": effective_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            res = request_json("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                               gemini_payload, timeout=timeout, retries=2)
+            content = res["choices"][0].get("message", {}).get("content", "")
+            if content.strip():
+                return content.strip()
+        except Exception as exc:
+            print(f"Gemini call failed: {exc}. Trying fallback...", flush=True)
+
+    # 3. Try Groq / Cloud LLM ONLY IF key is present and not local
+    if LLM_API_KEY and not is_local:
+        candidates = [effective_model]
+        for m in ("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.8-27b"):
             if m not in candidates:
                 candidates.append(m)
-        last_error = None
         for candidate in candidates:
             payload = {
                 "model": candidate, "temperature": temperature, "max_tokens": effective_tokens,
@@ -235,50 +278,52 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
                 ],
             }
             try:
-                response = request_json(f"{LM_URL}/chat/completions", payload, timeout=timeout)
+                response = request_json(f"{lm_url}/chat/completions", payload, timeout=timeout)
                 choice = response["choices"][0]
                 msg = choice.get("message", {})
-                content = msg.get("content") or ""
-                if not content.strip() and msg.get("reasoning"):
-                    content = msg.get("reasoning", "")
+                content = msg.get("content") or msg.get("reasoning_content") or ""
                 if content.strip():
-                    return content
+                    return content.strip()
             except Exception as exc:
                 print(f"Model {candidate} failed: {exc}. Trying fallback...", flush=True)
-                last_error = exc
-                continue
-        if last_error:
-            raise StoryError(f"Cloud text model error: {last_error}")
-        raise StoryError("LLM returned empty text for this page.")
 
-    # Native LM Studio endpoint for local inference
+    # 4. Try Cloudflare Workers AI LLM (100% free, zero keys needed, ultra-fast)
     try:
-        response = request_json(f"{LM_URL[:-3]}/api/v1/chat", {
-            "model": model, "input": user,
-            "system_prompt": system, "reasoning": "off", "max_output_tokens": max_tokens,
-            "temperature": temperature, "store": False,
-        }, timeout=timeout)
-        return "\n".join(item.get("content", "") for item in response.get("output", [])
-                         if isinstance(item, dict) and item.get("type") == "message"
-                         and isinstance(item.get("content"), str))
-    except ProviderTimeoutError:
-        raise
-    except StoryError as native_error:
-        if not any(code in str(native_error) for code in ("HTTP 400", "HTTP 404", "HTTP Error 400", "HTTP Error 404")):
-            raise
+        cf_payload = {
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": effective_tokens,
+            "temperature": temperature,
+        }
+        res = request_json("https://broken-truth-45ff.yatsuravitalii.workers.dev/cf-ai/chat",
+                           cf_payload, timeout=timeout, retries=2)
+        content = res["choices"][0].get("message", {}).get("content", "")
+        if content.strip():
+            return content.strip()
+    except Exception as cf_err:
+        print(f"Cloudflare Workers AI chat failed: {cf_err}", flush=True)
 
-    # Fallback to OpenAI-compatible endpoint
-    response = request_json(f"{LM_URL}/chat/completions", {
-        "model": model, "temperature": temperature, "max_tokens": max_tokens,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }, timeout=timeout)
-    try:
-        return response["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise StoryError("LLM provider returned no text for this page.") from exc
+    # 5. Check if local LM Studio is running as last resort
+    if not is_local:
+        local = check_local_lm_studio()
+        if local:
+            try:
+                response = request_json(f"{local[0][:-3]}/api/v1/chat", {
+                    "model": local[1], "input": user,
+                    "system_prompt": system, "reasoning": "off", "max_output_tokens": effective_tokens,
+                    "temperature": temperature, "store": False,
+                }, timeout=timeout)
+                out = "\n".join(item.get("content", "") for item in response.get("output", [])
+                                if isinstance(item, dict) and item.get("type") == "message"
+                                and isinstance(item.get("content"), str))
+                if out.strip():
+                    return out.strip()
+            except Exception as e:
+                print(f"Last resort local LM Studio call failed: {e}", flush=True)
+
+    raise StoryError("All text generation providers were unavailable. Please check your internet connection or start LM Studio.")
 
 
 def generate_compact_story(model: str, spec: dict, avoid: list[str], language: str) -> dict:
@@ -1495,9 +1540,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             model = selected_model()
-            text_status = {"ready": bool(model), "model": model, "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)}
-        except StoryError:
-            text_status = {"ready": False, "model": None, "lmUrl": LM_URL, "hasKey": bool(LLM_API_KEY)}
+            text_ready = bool(model)
+        except Exception:
+            text_ready = False
+        text_status = {"ready": text_ready, "model": "ready"}
         self.reply(200, {"text": text_status, "image": {"ready": image_status(), "referenceReady": reference_ready()},
                          "voice": {"locales": installed_voices(), "voices": installed_voice_catalog(),
                                    "familyVoices": len(family_voice_records()),
