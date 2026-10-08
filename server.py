@@ -1193,6 +1193,28 @@ def image_extras(data: dict) -> dict:
 def cloud_image_generate(prompt: str, style: str, extras: dict | None = None) -> dict:
     import random
     import urllib.parse
+
+    # 1. Primary: Cloudflare Workers AI (Flux Schnell / SDXL) - Ultra-fast, 100% free, reliable
+    try:
+        cf_payload = json.dumps({
+            "prompt": prompt,
+            "style": style,
+            "characterSheet": (extras or {}).get("characterSheet", ""),
+            "castVisuals": (extras or {}).get("castVisuals", ""),
+        }).encode("utf-8")
+        cf_req = Request(
+            "https://broken-truth-45ff.yatsuravitalii.workers.dev/cf-ai/image",
+            data=cf_payload,
+            headers={"Content-Type": "application/json", "User-Agent": "Storyworld/23"}
+        )
+        with urlopen(cf_req, timeout=30) as resp:
+            cf_res = json.loads(resp.read().decode("utf-8"))
+            if cf_res.get("imageBase64"):
+                return {"imageBase64": cf_res["imageBase64"], "mimeType": cf_res.get("mimeType", "image/jpeg")}
+    except Exception as cf_err:
+        print(f"Cloudflare Workers AI fallback triggered: {cf_err}", flush=True)
+
+    # 2. Secondary fallback: Pollinations
     style_desc = IMAGE_STYLES.get(style, "warm gentle watercolor storybook illustration")
     char_desc = ""
     if extras:
@@ -1203,16 +1225,15 @@ def cloud_image_generate(prompt: str, style: str, extras: dict | None = None) ->
     full_prompt = f"Gentle children's picture-book illustration, {style_desc}, {char_desc}consistent characters, no text, no lettering, {prompt}"
     encoded = urllib.parse.quote(full_prompt[:500])
     seed = random.randint(1000, 999999)
-    # Fast SDXL Turbo model generates in 1.5-2.5 seconds
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=turbo&nologo=true&seed={seed}"
-    req = Request(url, headers={"User-Agent": "Storyworld/23"})
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
     try:
-        with urlopen(req, timeout=25) as resp:
+        with urlopen(req, timeout=20) as resp:
             content = resp.read()
     except Exception as exc:
         try:
             url_flux = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=512&model=flux&nologo=true&seed={seed}"
-            with urlopen(Request(url_flux, headers={"User-Agent": "Storyworld/23"}), timeout=40) as resp:
+            with urlopen(Request(url_flux, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}), timeout=30) as resp:
                 content = resp.read()
         except Exception:
             raise StoryError(f"Cloud image generation failed: {exc}") from exc
