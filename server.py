@@ -79,7 +79,7 @@ class ProviderTimeoutError(StoryError):
     """A local provider accepted a request but did not finish in time."""
 
 
-def request_json(url: str, payload: dict | None = None, timeout: int = 120, extra_headers: dict | None = None) -> dict:
+def request_json(url: str, payload: dict | None = None, timeout: int = 120, extra_headers: dict | None = None, retries: int = 4) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -89,23 +89,42 @@ def request_json(url: str, payload: dict | None = None, timeout: int = 120, extr
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     if extra_headers:
         headers.update(extra_headers)
-    request = Request(url, data=data, headers=headers)
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except HTTPError as exc:
-        err_body = ""
+    for attempt in range(retries):
+        request = Request(url, data=data, headers=headers)
         try:
-            err_body = exc.read().decode("utf-8", errors="replace")[:400]
-        except Exception:
-            pass
-        raise StoryError(f"HTTP {exc.code} on {url}: {err_body or exc.reason}") from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
-    except URLError as exc:
-        if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
+            with urlopen(request, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:
+                pass
+            if exc.code == 429 and attempt < retries - 1:
+                wait_sec = 6.0
+                m = re.search(r"try again in ([\d\.]+)s", err_body, re.I)
+                if m:
+                    try:
+                        wait_sec = float(m.group(1)) + 0.6
+                    except ValueError:
+                        pass
+                else:
+                    retry_header = exc.headers.get("Retry-After") if exc.headers else None
+                    if retry_header:
+                        try:
+                            wait_sec = float(retry_header) + 0.6
+                        except ValueError:
+                            pass
+                print(f"Rate limited (429) on {url}. Retrying in {wait_sec:.2f}s...", flush=True)
+                time.sleep(wait_sec)
+                continue
+            raise StoryError(f"HTTP {exc.code} on {url}: {err_body or exc.reason}") from exc
+        except TimeoutError as exc:
             raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
-        raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
+        except URLError as exc:
+            if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
+                raise ProviderTimeoutError(f"Provider timed out after {timeout} seconds on {url}") from exc
+            raise StoryError(f"Provider unavailable: {exc} on {url}") from exc
 
 
 def is_cloud_llm() -> bool:
@@ -178,26 +197,36 @@ def chat_text(model: str, system: str, user: str, max_tokens: int, timeout: int 
               temperature: float = 0.45) -> str:
     """One LLM call. Native endpoint if local LM Studio, OpenAI-compatible if cloud or fallback."""
     if is_cloud_llm():
-        effective_tokens = min(max_tokens, 700)
-        payload = {
-            "model": model, "temperature": temperature, "max_tokens": effective_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
-        response = request_json(f"{LM_URL}/chat/completions", payload, timeout=timeout)
-        try:
-            choice = response["choices"][0]
-            msg = choice.get("message", {})
-            content = msg.get("content") or ""
-            if not content.strip() and msg.get("reasoning"):
-                content = msg.get("reasoning", "")
-            if not content.strip():
-                raise StoryError("LLM returned empty text for this page.")
-            return content
-        except (KeyError, IndexError, TypeError) as exc:
-            raise StoryError("LLM provider returned no text for this page.") from exc
+        effective_tokens = min(max_tokens, 240)
+        candidates = [model]
+        for m in ("qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+            if m not in candidates:
+                candidates.append(m)
+        last_error = None
+        for candidate in candidates:
+            payload = {
+                "model": candidate, "temperature": temperature, "max_tokens": effective_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            try:
+                response = request_json(f"{LM_URL}/chat/completions", payload, timeout=timeout)
+                choice = response["choices"][0]
+                msg = choice.get("message", {})
+                content = msg.get("content") or ""
+                if not content.strip() and msg.get("reasoning"):
+                    content = msg.get("reasoning", "")
+                if content.strip():
+                    return content
+            except Exception as exc:
+                print(f"Model {candidate} failed: {exc}. Trying fallback...", flush=True)
+                last_error = exc
+                continue
+        if last_error:
+            raise StoryError(f"Cloud text model error: {last_error}")
+        raise StoryError("LLM returned empty text for this page.")
 
     # Native LM Studio endpoint for local inference
     try:
@@ -320,6 +349,8 @@ def generate_compact_story(model: str, spec: dict, avoid: list[str], language: s
                        language, expected_pages=len(pages))
         if page_number == 1:
             title = page["heading"]
+        if page_number < page_total and is_cloud_llm():
+            time.sleep(0.8)
     return validate_story({"language": language, "title": title,
                            "subtitle": "", "profession": str(spec.get("profession", "")),
                            "sensitive": bool(spec["supportTopic"]),
@@ -930,7 +961,7 @@ def episode_recap(model: str, story: dict, memory: dict, continuity: dict, avoid
     try:
         if is_cloud_llm():
             response = request_json(f"{LM_URL}/chat/completions", {
-                "model": model, "max_tokens": 600,
+                "model": model, "max_tokens": 240,
                 "messages": [
                     {"role": "system", "content": 'Maintain a factual fictional series memory. Return JSON only: {"summary":"40 words","bible":"updated world canon, at most 150 words","facts":["3 lasting facts"],"nextThread":"one existing unresolved thread, or empty"}. Keep established origins and characters. Keep places, objects and relationships that may return later. Never invent an event, learning achievement, diagnosis or sacred quotation.'},
                     {"role": "user", "content": json.dumps({"previousBible": str(memory.get("bible", ""))[:1400], "title": story["title"], "scenes": [p["body"][:220] for p in story["pages"]]}, ensure_ascii=False)},
@@ -1338,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
                 model = query_model or selected_model()
                 res = request_json(f"{LM_URL}/chat/completions", {
                     "model": model,
-                    "max_tokens": 700,
+                    "max_tokens": 240,
                     "messages": [
                         {"role": "system", "content": "You write gentle children stories. Respond with JSON only: {\"heading\":\"Title\",\"body\":\"Story text.\",\"imagePrompt\":\"English prompt.\"}"},
                         {"role": "user", "content": "Write page 1 about a brave kitten named Murzik finding a star."}
