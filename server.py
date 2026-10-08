@@ -1180,6 +1180,10 @@ def image_extras(data: dict) -> dict:
     extras = {}
     if data.get("heroScene") is True:
         extras["heroScene"] = True
+    if data.get("heroPortrait") is True:
+        extras["heroPortrait"] = True
+    if data.get("photoBase64"):
+        extras["photoBase64"] = data["photoBase64"]
     for key in ("characterSheet", "castVisuals"):
         value = clean_text(data.get(key), 400)
         if value:
@@ -1194,13 +1198,15 @@ def cloud_image_generate(prompt: str, style: str, extras: dict | None = None) ->
     import random
     import urllib.parse
 
-    # 1. Primary: Cloudflare Workers AI (Flux Schnell / SDXL) - Ultra-fast, 100% free, reliable
+    # 1. Primary: Cloudflare Workers AI (img2img for photo reference + Flux Schnell / SDXL)
     try:
         cf_payload = json.dumps({
             "prompt": prompt,
             "style": style,
             "characterSheet": (extras or {}).get("characterSheet", ""),
             "castVisuals": (extras or {}).get("castVisuals", ""),
+            "photoBase64": (extras or {}).get("photoBase64", ""),
+            "heroPortrait": (extras or {}).get("heroPortrait", False),
         }).encode("utf-8")
         cf_req = Request(
             "https://broken-truth-45ff.yatsuravitalii.workers.dev/cf-ai/image",
