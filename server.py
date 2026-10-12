@@ -361,6 +361,17 @@ def generate_compact_story(model: str, spec: dict, avoid: list[str], language: s
         if page_number == page_total:
             request_spec["ending"] = ("Close this episode calmly. Leave one small open thread for tomorrow."
                                       if spec.get("continuity") else "Close the story calmly and completely.")
+        # Explicitly instruct the model to avoid forbidden topics
+        forbidden_words = []
+        for t in avoid:
+            forbidden_words.extend(ALIASES.get(t, [t.lower()]))
+        avoid_instruction = ""
+        if forbidden_words:
+            avoid_instruction = (
+                f" STRICT SAFETY: Do NOT mention, hint at, or describe any of these forbidden topics or words: "
+                f"{', '.join(forbidden_words)}. Do NOT use them even in reassurance or negation (for example, NEVER write 'no monsters' or 'not afraid of monsters'). Keep the atmosphere warm, cozy and gentle."
+            )
+
         instructions = (
             "Write one gentle, original children's story page for parent review. "
             "Respond with JSON only: {\"heading\":\"...\",\"body\":\"...\",\"imagePrompt\":\"...\"}. "
@@ -388,27 +399,65 @@ def generate_compact_story(model: str, spec: dict, avoid: list[str], language: s
             "Never make them the problem, the lesson or something to be fixed unless the supplied guidance asks for that topic. "
             "When sceneShowsChild is false, the imagePrompt describes the place, object or other characters of this page and does not mention the child."
         )
+        if avoid_instruction:
+            instructions += f" {avoid_instruction}"
+
+        page = None
         started = time.monotonic()
-        try:
-            content = chat_text(model, instructions, json.dumps(request_spec, ensure_ascii=False), 950)
-            page = parse_model_json(content)
-        except ProviderTimeoutError as exc:
-            log_generation(f"page={page_number}/{page_total} outcome=timeout seconds={time.monotonic()-started:.1f}")
-            raise StoryError("The local text model did not answer a short page in two minutes. "
-                             "Pause image generation or load a smaller non-reasoning instruct model in LM Studio.") from exc
-        except StoryError as exc:
-            log_generation(f"page={page_number}/{page_total} outcome={type(exc).__name__} seconds={time.monotonic()-started:.1f}")
-            raise StoryError(f"The local text model could not write page {page_number}: {exc}") from exc
-        heading = page.get("heading") or page.get("title") or page.get("name") or (f"Page {page_number}" if page_number > 1 else title)
-        body = page.get("body") or page.get("text") or page.get("content") or page.get("story") or ""
-        img_prompt = page.get("imagePrompt") or page.get("image_prompt") or page.get("prompt") or page.get("illustration") or ""
-        if not str(body).strip():
-            raise StoryError(f"The local text model returned an empty body for page {page_number}.")
-        if not str(img_prompt).strip():
-            img_prompt = f"Gentle story illustration: {spec['theme']}, {str(body)[:140]}"
-        page = {"heading": str(heading).strip(), "body": str(body).strip(), "imagePrompt": str(img_prompt).strip()}
-        page["reflectionPrompt"] = REFLECTIONS.get(language, REFLECTIONS["English"])
-        page["heroScene"] = hero_plan[page_number - 1]
+        for attempt in range(3):
+            attempt_instructions = instructions
+            if attempt > 0 and forbidden_words:
+                attempt_instructions += f" CRITICAL CORRECTION: Previous draft used a forbidden word. Rewrite this page completely without any of: {', '.join(forbidden_words)}."
+            try:
+                content = chat_text(model, attempt_instructions, json.dumps(request_spec, ensure_ascii=False), 950)
+                page = parse_model_json(content)
+            except ProviderTimeoutError as exc:
+                log_generation(f"page={page_number}/{page_total} outcome=timeout seconds={time.monotonic()-started:.1f}")
+                raise StoryError("The local text model did not answer a short page in two minutes. "
+                                 "Pause image generation or load a smaller non-reasoning instruct model in LM Studio.") from exc
+            except StoryError as exc:
+                if attempt == 2:
+                    log_generation(f"page={page_number}/{page_total} outcome={type(exc).__name__} seconds={time.monotonic()-started:.1f}")
+                    raise StoryError(f"The local text model could not write page {page_number}: {exc}") from exc
+                continue
+
+            if any(not isinstance(page.get(key), str) or not str(page[key]).strip() for key in ("heading", "body", "imagePrompt")):
+                if attempt == 2:
+                    raise StoryError(f"The local text model returned an incomplete page {page_number}.")
+                continue
+            heading = page["heading"]
+            body = page["body"]
+            img_prompt = page["imagePrompt"]
+
+            # Sanitize imagePrompt of accidental negative prompt tokens (e.g. 'no monsters')
+            clean_img_prompt = str(img_prompt).strip()
+            for w in forbidden_words:
+                clean_img_prompt = re.sub(rf"\b(no|without|zero|not)\s+{re.escape(w)}s?\b", "", clean_img_prompt, flags=re.IGNORECASE)
+                clean_img_prompt = re.sub(rf"\b{re.escape(w)}s?\b", "", clean_img_prompt, flags=re.IGNORECASE)
+            clean_img_prompt = re.sub(r"\s+", " ", clean_img_prompt).strip()
+
+            candidate_page = {"heading": str(heading).strip(), "body": str(body).strip(), "imagePrompt": clean_img_prompt}
+            candidate_page["reflectionPrompt"] = REFLECTIONS.get(language, REFLECTIONS["English"])
+            candidate_page["heroScene"] = hero_plan[page_number - 1]
+
+            # Validate child-facing text of this page against avoid topics
+            page_text = (candidate_page["heading"] + " " + candidate_page["body"]).lower()
+            violation = None
+            for topic in avoid:
+                needles = ALIASES.get(topic, [topic.lower()])
+                if any(word in page_text for word in needles):
+                    violation = topic
+                    break
+            if violation:
+                if attempt < 2:
+                    print(f"Page {page_number} attempt {attempt+1} contained excluded topic '{violation}'. Retrying with stronger safety prompt...", flush=True)
+                    continue
+                else:
+                    raise StoryError(f"Story contains an excluded topic: {violation}")
+
+            page = candidate_page
+            break
+
         log_generation(f"page={page_number}/{page_total} outcome=complete seconds={time.monotonic()-started:.1f}")
         pages.append(page)
         last_scene = page["body"]
@@ -704,7 +753,19 @@ def validate_story(story: dict, avoid: list[str], language: str, expected_pages:
             raise StoryError("The model returned an incomplete page.")
         if len(page["body"]) > 1800 or len(page["imagePrompt"]) > 700:
             raise StoryError("A page exceeds the safety length limit.")
-    all_text = json.dumps(story, ensure_ascii=False).lower()
+    # Check child-facing text (title, subtitle, headings, bodies, reflection)
+    text_chunks = [str(title or ""), str(story.get("subtitle", ""))]
+    for page in pages:
+        text_chunks.extend([str(page.get("heading", "")), str(page.get("body", "")), str(page.get("reflectionPrompt", ""))])
+        # Clean imagePrompt so image generator never gets negative tokens
+        img_p = str(page.get("imagePrompt", ""))
+        for topic in avoid:
+            for needle in ALIASES.get(topic, [topic.lower()]):
+                img_p = re.sub(rf"\b(no|without|zero|not)\s+{re.escape(needle)}s?\b", "", img_p, flags=re.IGNORECASE)
+                img_p = re.sub(rf"\b{re.escape(needle)}s?\b", "", img_p, flags=re.IGNORECASE)
+        page["imagePrompt"] = re.sub(r"\s+", " ", img_p).strip()
+
+    all_text = " ".join(text_chunks).lower()
     for topic in avoid:
         needles = ALIASES.get(topic, [topic.lower()])
         if any(word in all_text for word in needles):
