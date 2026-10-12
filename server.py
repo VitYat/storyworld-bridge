@@ -70,6 +70,31 @@ ALIASES = {
     "Dentist": ["dentist", "стоматолог", "зубной", "dentista"],
 }
 
+UNSAFE_CHILD_TOKENS = [
+    # Profanity / Slurs / Explicit sexual (Russian, Ukrainian, English)
+    "шлюх", "проститут", "хуй", "пизд", "ебат", "ебан", "бляд", "блят", "сук",
+    "мудак", "залуп", "пидор", "гондон", "дрочит", "порно", "секс", "курва",
+    "fuck", "bitch", "shit", "cunt", "dick", "pussy", "asshole", "slut", "whore", "porn",
+    # Drugs / Narcotics / Illegal substances
+    "наркоман", "наркотик", "кокаин", "героин", "метамфетамин", "гашиш", "марихуан",
+    "закладк", "drugs", "cocaine", "heroin", "meth", "weed", "overdose",
+    # Extreme violence / Weapons / Abuse
+    "убийств", "убить", "зарезать", "расчленить", "самоубийств", "повеситься", "террорист", "изнасилован",
+    "murder", "suicide", "rape", "terrorist"
+]
+
+
+def assert_child_safe_input(text: str, field_name: str = "Input") -> None:
+    if not isinstance(text, str) or not text.strip():
+        return
+    lowered = text.lower()
+    for bad in UNSAFE_CHILD_TOKENS:
+        if bad in lowered:
+            raise StoryError(
+                f"{field_name} contains inappropriate language or themes for a children's story. "
+                "Please keep the text gentle, safe and child-friendly."
+            )
+
 
 class StoryError(Exception):
     pass
@@ -418,12 +443,15 @@ def generate_compact_story(model: str, spec: dict, avoid: list[str], language: s
             except StoryError as exc:
                 if attempt == 2:
                     log_generation(f"page={page_number}/{page_total} outcome={type(exc).__name__} seconds={time.monotonic()-started:.1f}")
-                    raise StoryError(f"The local text model could not write page {page_number}: {exc}") from exc
+                    err_str = str(exc)
+                    if any(s in err_str.lower() for s in ("safety", "inappropriate", "policy", "cannot fulfill", "refuse")):
+                        raise StoryError("The AI model declined to write this story due to safety guidelines. Please keep the prompt gentle and child-friendly.") from exc
+                    raise StoryError(f"The text model could not write page {page_number}: {exc}") from exc
                 continue
 
             if any(not isinstance(page.get(key), str) or not str(page[key]).strip() for key in ("heading", "body", "imagePrompt")):
                 if attempt == 2:
-                    raise StoryError(f"The local text model returned an incomplete page {page_number}.")
+                    raise StoryError(f"The text model returned an incomplete page {page_number}.")
                 continue
             heading = page["heading"]
             body = page["body"]
@@ -909,6 +937,8 @@ def generate_story(data: dict) -> dict:
         raise StoryError("A support topic cannot override an excluded topic")
     content_rules, extra = pack_rules(content_pack, theme, tradition, data, age)
     day_event = clean_text(data.get("dayEvent"), 300)
+    assert_child_safe_input(day_event, "Today's event")
+    assert_child_safe_input(clean_text(data.get("characterSheet"), 500), "Character description")
     lowered = day_event.lower()
     for topic in avoid:
         if any(word in lowered for word in ALIASES.get(topic, [topic.lower()])):
